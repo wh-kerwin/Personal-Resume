@@ -1,0 +1,17 @@
+# 依赖与构建产物
+node_modules
+dist
+
+# Vercel
+.vercel
+
+# 本地临时文件
+dev.log
+*.log
+.tmpv
+.playwright-mcp
+f1-about.png
+f2-about.png
+f3-timeline.png
+f4-projects.png
+f5-contact.png
