@@ -6,15 +6,15 @@ import { useGSAP } from "@gsap/react";
 gsap.registerPlugin(ScrollTrigger);
 
 /* ------------------------------------------------------------------ */
-/*  组件：章节人物（帧序列 + GSAP 滚动擦洗）                              */
+/*  组件：章节人物（帧序列 + 分层视差）                                   */
 /*                                                                      */
-/*  与之前的 <video> 方案相比：                                           */
-/*    - GSAP ScrollTrigger scrub 直接驱动帧序号，滚动同步零延迟；          */
-/*    - 帧逐张预加载（10fps webp，整段仅 1~2.4MB），无 seek 卡顿；         */
-/*    - 媒体盒用羽化蒙版 + 暗角渐变，人物融化进页面背景，不再像贴片。       */
-/*                                                                      */
-/*  调度（共享 rAF）：视口中心所在章节的人物出场（crossfade），             */
-/*  鼠标视差 + 呼吸浮动让人物保持"活着"。                                 */
+/*  视差分层（无需抠像）：                                                */
+/*    · 环境层：同一帧的高斯模糊副本，放在 translateZ(-70px) 的远平面，     */
+/*      与清晰的人物层形成真实 3D 纵深，转头/滚动时两层位移不同步          */
+/*    · 滚动漂移：人物随章节穿越视口上下漂移 ±70px，与文字形成速度差       */
+/*    · 速度惯性：由 ScrollTrigger.getVelocity() 驱动挤压/倾斜，滚动越快   */
+/*      人物"迎风"形变越明显，停止后自然回弹                              */
+/*    · 鼠标视差 + 呼吸浮动，让人物始终"活着"                             */
 /* ------------------------------------------------------------------ */
 
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
@@ -25,16 +25,20 @@ const FEATHER_MASK =
 
 interface Entry {
   el: HTMLElement; // 所在章节
-  box: HTMLDivElement; // 媒体盒（出入场 / 蒙版）
-  canvas: HTMLCanvasElement;
+  box: HTMLDivElement; // 出入场容器
+  tilt: HTMLDivElement; // 3D 变换层
+  canvas: HTMLCanvasElement; // 人物层
   ctx: CanvasRenderingContext2D;
+  bgCanvas: HTMLCanvasElement; // 环境层（模糊）
+  bgCtx: CanvasRenderingContext2D;
   bar: HTMLSpanElement;
   frames: string[];
   imgs: (HTMLImageElement | null)[];
   scrollF: number; // GSAP scrub 写入的帧位置（小数）
   lastIdx: number;
   dirty: boolean;
-  loaded: boolean; // 是否已开始批量预加载
+  vel: number; // 滚动速度（归一化，带衰减）
+  loaded: boolean;
   active: boolean;
   load: () => void;
 }
@@ -53,6 +57,23 @@ function bindGlobal() {
     tnx = (e.clientX / window.innerWidth) * 2 - 1;
     tny = (e.clientY / window.innerHeight) * 2 - 1;
   }, { passive: true });
+}
+
+/** 把目标帧画到指定画布，未就绪时用相邻已加载帧兜底 */
+function paint(e: Entry, cv: HTMLCanvasElement, ctx: CanvasRenderingContext2D) {
+  const n = e.frames.length;
+  const idx = clamp(Math.round(e.scrollF), 0, n - 1);
+  let j = idx;
+  while (j >= 0 && !isReady(e.imgs[j])) j--;
+  if (j < 0) { j = idx; while (j < n && !isReady(e.imgs[j])) j++; }
+  if (j >= n) return -1;
+  const img = e.imgs[j]!;
+  if (cv.width !== img.naturalWidth) {
+    cv.width = img.naturalWidth;
+    cv.height = img.naturalHeight;
+  }
+  ctx.drawImage(img, 0, 0);
+  return j;
 }
 
 function ensureLoop() {
@@ -98,30 +119,24 @@ function ensureLoop() {
 
       if (!e.active) continue;
 
-      /* ---- 5. 镜头视差 + 呼吸浮动（用 gsap.ticker 的 time，切后台即停）---- */
+      /* ---- 5. 分层视差 + 速度惯性 + 呼吸浮动 ---- */
+      e.vel *= Math.exp(-dt * 4); // 停止滚动后自然回弹
+      const drift = (0.5 - p) * 70; // 与文字形成速度差的纵向漂移
       const bob = Math.sin(time * 1.1) * 5;
       const breathe = 1 + Math.sin(time * 0.72) * 0.006;
-      e.canvas.style.transform =
-        `perspective(1000px) rotateY(${(-snx * 2.6).toFixed(2)}deg) rotateX(${(sny * 1.6).toFixed(2)}deg) ` +
-        `translateY(${(sny * -5 + bob).toFixed(1)}px) scale(${breathe.toFixed(4)})`;
+      e.tilt.style.transform =
+        `rotateY(${(-snx * 3.4).toFixed(2)}deg) rotateX(${(sny * 2.2).toFixed(2)}deg) ` +
+        `translateY(${(sny * -6 + bob + drift).toFixed(1)}px) ` +
+        `skewY(${(-e.vel * 1.5).toFixed(2)}deg) ` +
+        `scaleY(${(breathe + Math.abs(e.vel) * 0.035).toFixed(4)}) scaleX(${(1 - Math.abs(e.vel) * 0.012).toFixed(4)})`;
 
-      /* ---- 6. 绘制当前帧 ---- */
-      const n = e.frames.length;
-      const idx = clamp(Math.round(e.scrollF), 0, n - 1);
-      if (!e.dirty && idx === e.lastIdx) continue;
-
-      // 就近回退：目标帧未就绪时先用相邻已加载帧兜底
-      let j = idx;
-      while (j >= 0 && !isReady(e.imgs[j])) j--;
-      if (j < 0) { j = idx; while (j < n && !isReady(e.imgs[j])) j++; }
-      if (j >= n) continue;
-      const img = e.imgs[j]!;
-      if (e.canvas.width !== img.naturalWidth) {
-        e.canvas.width = img.naturalWidth;
-        e.canvas.height = img.naturalHeight;
+      /* ---- 6. 绘制当前帧（人物层 + 环境层）---- */
+      const drawn = paint(e, e.canvas, e.ctx);
+      if (!e.dirty && drawn === e.lastIdx) continue;
+      if (drawn >= 0) {
+        paint(e, e.bgCanvas, e.bgCtx);
+        e.lastIdx = drawn;
       }
-      e.ctx.drawImage(img, 0, 0);
-      e.lastIdx = j;
       e.dirty = false;
     }
   };
@@ -152,23 +167,29 @@ export default function CharacterStage({
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  const tiltRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const barRef = useRef<HTMLSpanElement>(null);
 
   /* useGSAP：自动在卸载时回滚动画与 ScrollTrigger，并以 wrapRef 限定作用域 */
   useGSAP(() => {
     const wrap = wrapRef.current;
     const box = boxRef.current;
+    const tilt = tiltRef.current;
     const canvas = canvasRef.current;
+    const bgCanvas = bgCanvasRef.current;
     const bar = barRef.current;
-    if (!wrap || !box || !canvas || !bar || frames.length === 0) return;
-    const ctx = canvas.getContext("2d")!;
+    if (!wrap || !box || !tilt || !canvas || !bgCanvas || !bar || frames.length === 0) return;
 
     const entry: Entry = {
       el: wrap.parentElement as HTMLElement, // 所在章节
       box,
+      tilt,
       canvas,
-      ctx,
+      ctx: canvas.getContext("2d")!,
+      bgCanvas,
+      bgCtx: bgCanvas.getContext("2d")!,
       bar,
       frames,
       imgs: frames.map((src, i) => {
@@ -181,6 +202,7 @@ export default function CharacterStage({
       scrollF: 0,
       lastIdx: -1,
       dirty: true,
+      vel: 0,
       loaded: false,
       active: false,
       load() {
@@ -210,10 +232,12 @@ export default function CharacterStage({
         start: "top bottom",
         end: "bottom top",
         scrub: 1,
-      },
-      onUpdate: () => {
-        entry.scrollF = obj.f;
-        entry.dirty = true;
+        onUpdate: (self) => {
+          entry.scrollF = obj.f;
+          entry.dirty = true;
+          // 滚动速度 → 惯性形变（归一化到 ±1）
+          entry.vel = gsap.utils.clamp(-1, 1, self.getVelocity() / 2400);
+        },
       },
     });
 
@@ -242,7 +266,21 @@ export default function CharacterStage({
             className={`relative overflow-hidden ${frameClass}`}
             style={{ WebkitMaskImage: FEATHER_MASK, maskImage: FEATHER_MASK }}
           >
-            <canvas ref={canvasRef} className="h-full w-full will-change-transform" />
+            {/* 3D 舞台：环境层（远）+ 人物层（近），转头时产生真实视差 */}
+            <div className="absolute inset-0 [perspective:900px]">
+              <div ref={tiltRef} className="absolute inset-0 [transform-style:preserve-3d] will-change-transform">
+                <canvas
+                  ref={bgCanvasRef}
+                  className="absolute inset-0 h-full w-full scale-[1.18] opacity-45 blur-[10px]"
+                  style={{ transform: "translateZ(-70px)" }}
+                />
+                <canvas
+                  ref={canvasRef}
+                  className="absolute inset-0 h-full w-full"
+                  style={{ transform: "translateZ(0px)" }}
+                />
+              </div>
+            </div>
             {/* 暗角渐变：边缘压向页面底色 */}
             <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(10,17,34,0.3)_0%,transparent_20%,transparent_58%,rgba(10,17,34,0.45)_84%,rgba(10,17,34,0.78)_100%)]" />
           </div>
