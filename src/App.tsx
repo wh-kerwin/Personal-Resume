@@ -1,6 +1,8 @@
-import { useEffect } from "react";
+import { useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { SplitText } from "gsap/SplitText";
+import { useGSAP } from "@gsap/react";
 import GazeBanner from "./components/GazeBanner";
 import CharacterStage from "./components/CharacterStage";
 
@@ -15,7 +17,7 @@ const framesOf = (name: string) =>
     .sort()
     .map((p) => frameModules[p]);
 
-gsap.registerPlugin(ScrollTrigger);
+gsap.registerPlugin(useGSAP, ScrollTrigger, SplitText);
 
 type SectionKey = "hero" | "about" | "skills" | "timeline" | "projects" | "contact";
 
@@ -167,86 +169,140 @@ function Thumb({ kind }: { kind: ThumbKind }) {
 /*  主组件                                                              */
 /* ------------------------------------------------------------------ */
 export default function App() {
-  useEffect(() => {
-    const ctx = gsap.context(() => {
-      /* ---- 滚动到哪一节，右侧圆点就点亮哪一节 ---- */
-      KEYS.forEach((k) => {
-        ScrollTrigger.create({
-          trigger: `#sec-${k}`,
-          start: "top 58%",
-          end: "bottom 42%",
-          onToggle: (self) => {
-            document.querySelector(`[data-dot="${k}"]`)?.classList.toggle("is-active", self.isActive);
-          },
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useGSAP(
+    (_self, contextSafe) => {
+      /* 所有动效只在"不要求减少动效"时启用；减少动效时仅保留静态排版 */
+      const mm = gsap.matchMedia();
+
+      mm.add("(prefers-reduced-motion: no-preference)", () => {
+        /* ---- 滚动到哪一节，右侧圆点就点亮哪一节 ---- */
+        KEYS.forEach((k) => {
+          ScrollTrigger.create({
+            trigger: `#sec-${k}`,
+            start: "top 58%",
+            end: "bottom 42%",
+            onToggle: (s) => {
+              document.querySelector(`[data-dot="${k}"]`)?.classList.toggle("is-active", s.isActive);
+            },
+          });
+        });
+
+        /* ---- 文字入场：按屏批量 stagger，比逐元素触发更整齐 ---- */
+        gsap.set("[data-reveal]", { y: 48, autoAlpha: 0 });
+        ScrollTrigger.batch("[data-reveal]", {
+          interval: 0.12,
+          batchMax: 6,
+          start: "top 88%",
+          once: true,
+          onEnter: (batch) =>
+            gsap.to(batch, {
+              y: 0,
+              autoAlpha: 1,
+              duration: 0.9,
+              ease: "power3.out",
+              stagger: 0.08,
+              overwrite: true,
+            }),
+        });
+
+        /* ---- 技能条 ---- */
+        gsap.utils.toArray<HTMLElement>("[data-bar]").forEach((el) => {
+          gsap.fromTo(el, { scaleX: 0.02 }, {
+            scaleX: Number(el.dataset.bar) / 100,
+            duration: 1.3,
+            ease: "power3.out",
+            scrollTrigger: { trigger: el, start: "top 90%", once: true },
+          });
+        });
+
+        /* ---- 经历时间轴划线 ---- */
+        gsap.fromTo("#tl-line", { scaleY: 0 }, {
+          scaleY: 1,
+          ease: "none",
+          scrollTrigger: { trigger: "#tl-list", start: "top 78%", end: "bottom 62%", scrub: 0.8 },
+        });
+
+        /* ---- 顶部阅读进度 ---- */
+        gsap.to("#progress", {
+          scaleX: 1,
+          ease: "none",
+          scrollTrigger: { start: 0, end: "max", scrub: 0.3 },
+        });
+
+        /* ---- 章节编号：随滚动轻微上浮，制造纵深 ---- */
+        gsap.utils.toArray<HTMLElement>(".ghost-num").forEach((el) => {
+          gsap.fromTo(el, { yPercent: 14 }, {
+            yPercent: -14,
+            ease: "none",
+            scrollTrigger: { trigger: el, start: "top bottom", end: "bottom top", scrub: 0.8 },
+          });
+        });
+
+        /* ---- 渐进式文字揭示：逐词随滚动点亮（scrubbing text reveal）---- */
+        gsap.utils.toArray<HTMLElement>("[data-scrub-text]").forEach((el) => {
+          const split = SplitText.create(el, { type: "words", autoSplit: true });
+          gsap.from(split.words, {
+            opacity: 0.18,
+            ease: "none",
+            stagger: 0.4,
+            scrollTrigger: { trigger: el, start: "top 82%", end: "bottom 52%", scrub: 0.6 },
+          });
+          return () => split.revert();
         });
       });
 
-      /* ---- 文字入场 ---- */
-      gsap.utils.toArray<HTMLElement>("[data-reveal]").forEach((el) => {
-        gsap.from(el, {
-          y: 48,
-          autoAlpha: 0,
-          duration: 0.9,
-          ease: "power3.out",
-          scrollTrigger: { trigger: el, start: "top 87%", once: true },
+      /* 减少动效：只做一次淡入，不做位移/擦洗 */
+      mm.add("(prefers-reduced-motion: reduce)", () => {
+        gsap.set("[data-reveal]", { autoAlpha: 1, y: 0 });
+        gsap.utils.toArray<HTMLElement>("[data-bar]").forEach((el) => {
+          gsap.set(el, { scaleX: Number(el.dataset.bar) / 100 });
         });
       });
 
-      /* ---- 技能条 ---- */
-      gsap.utils.toArray<HTMLElement>("[data-bar]").forEach((el) => {
-        const v = Number(el.dataset.bar) / 100;
-        gsap.fromTo(el, { scaleX: 0.02 }, {
-          scaleX: v,
-          duration: 1.3,
-          ease: "power3.out",
-          scrollTrigger: { trigger: el, start: "top 90%", once: true },
-        });
-      });
+      /* ---- 首屏入场主时间线：用 label 编排，避免 delay 链式堆叠 ---- */
+      const tl = gsap.timeline({ defaults: { ease: "power3.out" }, delay: 0.15 });
+      const titleSplit = SplitText.create(".hero-title", { type: "lines", autoSplit: true, linesClass: "hero-line" });
+      tl.addLabel("stage", 0)
+        .from(".hero-banner", { autoAlpha: 0, scale: 1.12, filter: "blur(16px)", duration: 1.5, ease: "power2.out" }, "stage")
+        .from(".hero-line", { yPercent: 105, autoAlpha: 0, duration: 1, stagger: 0.12 }, "stage+=0.2")
+        .from(
+          ".hero-anim:not(.hero-banner):not(.hero-title)",
+          { y: 34, autoAlpha: 0, duration: 0.85, stagger: 0.09 },
+          "stage+=0.45"
+        )
+        .from(".hero-deco", { autoAlpha: 0, scale: 0.6, duration: 0.8, stagger: 0.12, ease: "back.out(2)" }, "stage+=0.7");
 
-      /* ---- 经历时间轴划线 ---- */
-      gsap.fromTo("#tl-line", { scaleY: 0 }, {
-        scaleY: 1,
-        ease: "none",
-        scrollTrigger: { trigger: "#tl-list", start: "top 78%", end: "bottom 62%", scrub: 0.6 },
-      });
+      /* ---- 首屏漂浮装饰的鼠标视差（contextSafe 包裹，卸载后自动失效）---- */
+      const decos = gsap.utils.toArray<HTMLElement>("[data-parallax]").map((el) => ({
+        x: gsap.quickTo(el, "x", { duration: 0.8, ease: "power3" }),
+        y: gsap.quickTo(el, "y", { duration: 0.8, ease: "power3" }),
+        s: Number(el.dataset.parallax) || 18,
+      }));
+      const parallax = (e: PointerEvent) => {
+        const nx = (e.clientX / window.innerWidth) * 2 - 1;
+        const ny = (e.clientY / window.innerHeight) * 2 - 1;
+        decos.forEach((d) => { d.x(nx * d.s); d.y(ny * d.s); });
+      };
+      const onMove = (contextSafe?.(parallax) ?? parallax) as EventListener;
+      window.addEventListener("pointermove", onMove);
 
-      /* ---- 顶部阅读进度 ---- */
-      gsap.to("#progress", {
-        scaleX: 1,
-        ease: "none",
-        scrollTrigger: { start: 0, end: "max", scrub: 0.3 },
-      });
-
-      /* ---- 首屏入场 ---- */
-      gsap.timeline({ defaults: { ease: "power3.out" } })
-        .from(".hero-anim", { y: 44, autoAlpha: 0, duration: 0.85, stagger: 0.1, delay: 0.2 });
-    });
-
-    /* ---- 首屏漂浮装饰的鼠标视差 ---- */
-    const decos = gsap.utils.toArray<HTMLElement>("[data-parallax]").map((el) => ({
-      x: gsap.quickTo(el, "x", { duration: 0.7, ease: "power3" }),
-      y: gsap.quickTo(el, "y", { duration: 0.7, ease: "power3" }),
-      s: Number(el.dataset.parallax) || 18,
-    }));
-    const onMove = (e: PointerEvent) => {
-      const nx = (e.clientX / window.innerWidth) * 2 - 1;
-      const ny = (e.clientY / window.innerHeight) * 2 - 1;
-      decos.forEach((d) => { d.x(nx * d.s); d.y(ny * d.s); });
-    };
-    window.addEventListener("pointermove", onMove);
-
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      ctx.revert();
-    };
-  }, []);
+      return () => {
+        window.removeEventListener("pointermove", onMove);
+        titleSplit.revert();
+        mm.revert();
+      };
+    },
+    { scope: rootRef }
+  );
 
   const jump = (k: SectionKey) => {
     document.getElementById(`sec-${k}`)?.scrollIntoView({ behavior: "smooth" });
   };
 
   return (
-    <div className="relative min-h-screen">
+    <div ref={rootRef} className="relative min-h-screen">
       <div className="atmos" aria-hidden />
 
       {/* 阅读进度条 */}
@@ -303,16 +359,16 @@ export default function App() {
         {/* ================= HERO ================= */}
         <section id="sec-hero" className="relative flex min-h-screen flex-col justify-center overflow-hidden px-5 pt-24 pb-16 md:px-10">
           {/* 全屏视频 Banner：人物视线跟随鼠标 */}
-          <GazeBanner className="hero-anim" />
+          <GazeBanner className="hero-anim hero-banner" />
 
           {/* 漂浮装饰 */}
-          <svg data-parallax="26" className="drift absolute top-[16%] left-[6%] hidden h-10 w-10 text-azure/70 lg:block" style={{ "--rot": "12deg" } as React.CSSProperties} viewBox="0 0 40 40" fill="none">
+          <svg data-parallax="26" className="hero-deco drift absolute top-[16%] left-[6%] hidden h-10 w-10 text-azure/70 lg:block" style={{ "--rot": "12deg" } as React.CSSProperties} viewBox="0 0 40 40" fill="none">
             <path d="M20 4v32M4 20h32" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
           </svg>
-          <svg data-parallax="-20" className="drift absolute top-[24%] right-[64%] hidden h-8 w-8 text-amber/70 lg:block" style={{ "--rot": "-8deg", animationDelay: "0.8s" } as React.CSSProperties} viewBox="0 0 40 40" fill="none">
+          <svg data-parallax="-20" className="hero-deco drift absolute top-[24%] right-[64%] hidden h-8 w-8 text-amber/70 lg:block" style={{ "--rot": "-8deg", animationDelay: "0.8s" } as React.CSSProperties} viewBox="0 0 40 40" fill="none">
             <rect x="8" y="8" width="24" height="24" stroke="currentColor" strokeWidth="3" transform="rotate(12 20 20)" />
           </svg>
-          <svg data-parallax="34" className="drift absolute bottom-[28%] left-[28%] hidden h-9 w-9 text-coral/70 lg:block" style={{ animationDelay: "1.6s" } as React.CSSProperties} viewBox="0 0 40 40" fill="none">
+          <svg data-parallax="34" className="hero-deco drift absolute bottom-[28%] left-[28%] hidden h-9 w-9 text-coral/70 lg:block" style={{ animationDelay: "1.6s" } as React.CSSProperties} viewBox="0 0 40 40" fill="none">
             <circle cx="20" cy="20" r="14" stroke="currentColor" strokeWidth="3" />
             <circle cx="20" cy="20" r="4" fill="currentColor" />
           </svg>
@@ -323,7 +379,7 @@ export default function App() {
                 <span className="inline-block h-[2px] w-10 bg-azure" />
                 FRONTEND · 9 YEARS · HEFEI
               </p>
-              <h1 className="hero-anim font-disp text-[clamp(3.2rem,9vw,7rem)] leading-[1.02] text-snow">
+              <h1 className="hero-anim hero-title font-disp text-[clamp(3.2rem,9vw,7rem)] leading-[1.02] text-snow">
                 你好，我是<br />
                 <span className="brush text-coral">吴寒</span>
                 <span className="ml-3 align-middle font-mono text-base tracking-widest text-mist md:text-lg">// 前端开发工程师</span>
@@ -401,7 +457,7 @@ export default function App() {
             <SectionHead num="01" title="关于我" en="ABOUT ME" />
             <div className="grid gap-8 lg:grid-cols-[1.4fr_1fr]">
               <div className="space-y-5 text-[15px] leading-loose text-mist">
-                <p data-reveal>
+                <p data-scrub-text>
                   我是吴寒，男，32 岁，淮北师范大学计算机专业毕业，目前在<strong className="text-snow">合肥</strong>看新机会。
                   从 2017 年入行到今天，<strong className="text-snow">9 年</strong>只做了一件事——把业务需求稳稳地翻译成页面：
                   烟草研判平台、海关联合指挥系统、RPA 机器人管理后台、课程资源中心……

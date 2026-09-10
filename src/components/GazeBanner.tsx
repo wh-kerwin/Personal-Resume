@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import gsap from "gsap";
 import bannerUrl from "../../video/banner.mp4?url";
 
 /* ------------------------------------------------------------------ */
@@ -62,10 +63,8 @@ export default function GazeBanner({ className = "" }: { className?: string }) {
     let tm = T_CENTER; // 当前影片时间
     let auto = true; // true = 交给视频自然播放，false = 跟随鼠标擦洗
     let lastMove = 0;
-    let last = performance.now();
     let visible = true;
     let text = "";
-    let raf = 0;
 
     const updateRect = () => {
       rect = wrap.getBoundingClientRect();
@@ -78,7 +77,7 @@ export default function GazeBanner({ className = "" }: { className?: string }) {
       // 以首屏中心为原点归一化
       tnx = clamp((e.clientX - cx) / (rect.width * 0.62), -1, 1);
       tny = clamp((e.clientY - cy) / (rect.height * 0.62), -1, 1);
-      lastMove = performance.now();
+      lastMove = gsap.ticker.time * 1000; // 与 tick 同一时间基准
 
       if (!reduce && auto) {
         auto = false;
@@ -91,10 +90,10 @@ export default function GazeBanner({ className = "" }: { className?: string }) {
       }
     };
 
-    const tick = (now: number) => {
-      raf = requestAnimationFrame(tick);
-      const dt = Math.min(0.05, (now - last) / 1000);
-      last = now;
+    /* 统一挂到 gsap.ticker：与页面其它 GSAP 动效共用一条时钟，切后台自动暂停 */
+    const tick = (time: number, deltaMs: number) => {
+      const now = time * 1000; // gsap.ticker 的 time 为启动以来的秒数
+      const dt = Math.min(0.05, deltaMs / 1000);
       if (!visible) return;
 
       const k = 1 - Math.exp(-dt * 7);
@@ -159,11 +158,11 @@ export default function GazeBanner({ className = "" }: { className?: string }) {
     window.addEventListener("pointermove", onMove, { passive: true });
     window.addEventListener("scroll", updateRect, { passive: true });
     window.addEventListener("resize", updateRect);
-    raf = requestAnimationFrame(tick);
+    gsap.ticker.add(tick);
     void video.play().catch(() => {});
 
     return () => {
-      cancelAnimationFrame(raf);
+      gsap.ticker.remove(tick);
       io.disconnect();
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("scroll", updateRect);

@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { useGSAP } from "@gsap/react";
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -56,13 +57,10 @@ function bindGlobal() {
 
 function ensureLoop() {
   if (loopId || registry.size === 0) return;
-  let last = performance.now();
 
-  const tick = (now: number) => {
-    if (registry.size === 0) { loopId = 0; return; }
-    loopId = requestAnimationFrame(tick);
-    const dt = Math.min(0.05, (now - last) / 1000);
-    last = now;
+  const tick = (time: number, deltaMs: number) => {
+    if (registry.size === 0) { loopId = 0; gsap.ticker.remove(tick); return; }
+    const dt = Math.min(0.05, deltaMs / 1000);
     const vh = window.innerHeight;
     const mid = vh * 0.5;
 
@@ -100,9 +98,9 @@ function ensureLoop() {
 
       if (!e.active) continue;
 
-      /* ---- 5. 镜头视差 + 呼吸浮动 ---- */
-      const bob = Math.sin(now / 900) * 5;
-      const breathe = 1 + Math.sin(now / 1400) * 0.006;
+      /* ---- 5. 镜头视差 + 呼吸浮动（用 gsap.ticker 的 time，切后台即停）---- */
+      const bob = Math.sin(time * 1.1) * 5;
+      const breathe = 1 + Math.sin(time * 0.72) * 0.006;
       e.canvas.style.transform =
         `perspective(1000px) rotateY(${(-snx * 2.6).toFixed(2)}deg) rotateX(${(sny * 1.6).toFixed(2)}deg) ` +
         `translateY(${(sny * -5 + bob).toFixed(1)}px) scale(${breathe.toFixed(4)})`;
@@ -127,7 +125,8 @@ function ensureLoop() {
       e.dirty = false;
     }
   };
-  loopId = requestAnimationFrame(tick);
+  loopId = 1; // 已挂载到 gsap.ticker（1 = 运行中，0 = 空闲）
+  gsap.ticker.add(tick);
 }
 
 /* ------------------------------------------------------------------ */
@@ -156,7 +155,8 @@ export default function CharacterStage({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const barRef = useRef<HTMLSpanElement>(null);
 
-  useEffect(() => {
+  /* useGSAP：自动在卸载时回滚动画与 ScrollTrigger，并以 wrapRef 限定作用域 */
+  useGSAP(() => {
     const wrap = wrapRef.current;
     const box = boxRef.current;
     const canvas = canvasRef.current;
@@ -200,31 +200,28 @@ export default function CharacterStage({
     bindGlobal();
     ensureLoop();
 
-    /* ---- GSAP 滚动擦洗：章节穿越视口 = 0 → 末帧 ---- */
+    /* ---- GSAP 滚动擦洗：章节穿越视口 = 0 → 末帧（scrub 越大越顺滑）---- */
     const obj = { f: 0 };
-    const ctxGsap = gsap.context(() => {
-      gsap.to(obj, {
-        f: frames.length - 1,
-        ease: "none",
-        scrollTrigger: {
-          trigger: entry.el,
-          start: "top bottom",
-          end: "bottom top",
-          scrub: 0.5,
-        },
-        onUpdate: () => {
-          entry.scrollF = obj.f;
-          entry.dirty = true;
-        },
-      });
-    }, wrap);
+    gsap.to(obj, {
+      f: frames.length - 1,
+      ease: "none",
+      scrollTrigger: {
+        trigger: entry.el,
+        start: "top bottom",
+        end: "bottom top",
+        scrub: 1,
+      },
+      onUpdate: () => {
+        entry.scrollF = obj.f;
+        entry.dirty = true;
+      },
+    });
 
     return () => {
-      ctxGsap.revert();
       registry.delete(entry);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, { scope: wrapRef });
 
   return (
     <div
